@@ -1,0 +1,13 @@
+dlib
+matplotlib
+numpy
+opencv-python
+optuna
+pandas
+pillow
+scikit-learn
+scipy
+tensorflow
+torch
+torchsummary
+tqdm
