@@ -16,6 +16,7 @@ notebook = "^7.4.5"
 scikit-image = "^0.25.2"
 scikit-learn = "^1.7.1"
 tqdm = "^4.67.1"
+dlib = "^20.0.0"
 
 
 [build-system]
