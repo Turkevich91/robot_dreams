@@ -23,3 +23,10 @@ for i in range(750):
 cap.release()
 cv2.destroyAllWindows()
 
+"""
+After trying to track cars, I realized it was hard to reliably trigger conditions that reveal each tracker's strengths and weaknesses. So I switched to tracking my handheld device (orange Rabbit R1) to stress specific failure modes under controlled challenges.
+
+KCF is fast but less accurate; CSRT is slower but more accurate.
+KCF tends to lose the target more easily; CSRT is usually more robust. However, in my experiment KCF recovered from occlusions better, while CSRT drifted over time (it started tracking my finger instead of the Rabbit R1).
+Note: although CSRT is commonly considered better at handling occlusions and recovery, this result is just an observation for my case, not a general claim.
+"""
