@@ -273,6 +273,9 @@ def overlay_wheel(frame, wheel_rgba, angle_deg, x=20, y=20, alpha_mul=0.9, scale
 def draw_steering_wheel(frame, wheel_img, angle, anchor=WHEEL_ANCHOR, offset=WHEEL_OFFSET, scale=WHEEL_SCALE):
     """Draw steering wheel overlay on frame with anchor positioning.
 
+    Реалистичное позиционирование руля, как если бы камера была установлена на лобовом стекле машины,
+    и руль виден в нижней части кадра (эффект видеорегистратора).
+
     Args:
         frame: Input frame (BGR)
         wheel_img: RGBA wheel image
@@ -289,16 +292,23 @@ def draw_steering_wheel(frame, wheel_img, angle, anchor=WHEEL_ANCHOR, offset=WHE
 
     h, w = frame.shape[:2]
     ww, wh = wheel_img.shape[1], wheel_img.shape[0]
-    # Account for scaling when calculating scaled dimensions
+
+    # ВАЖНОЕ ИСПРАВЛЕНИЕ: учитываем масштабирование при расчёте позиции
+    # Без этого руль отображался далеко от угла, так как использовались оригинальные размеры
     scaled_ww = int(ww * scale)
     scaled_wh = int(wh * scale)
     dx, dy = offset
     anchor = anchor.lower()
 
-    # Calculate x position based on scaled wheel width
+    # Расчёт позиции X с учётом якоря и масштабированной ширины
+    # 'l' (левый якорь) → позиция от левого края + смещение
+    # иначе (правый якорь) → позиция от правого края минус масштабированная ширина и смещение
     x0 = dx if 'l' in anchor else w - scaled_ww - dx
 
-    # Calculate y position based on scaled wheel height
+    # Расчёт позиции Y с учётом якоря и масштабированной высоты
+    # 't' (верхний якорь) → позиция от верхнего края + смещение
+    # иначе (нижний якорь) → позиция от нижнего края минус масштабированная высота и смещение
+    # ОСОБЕННОСТЬ: руль частично выходит за границу снизу — это выглядит реалистично!
     y0 = dy if 't' in anchor else h - scaled_wh - dy
 
     return overlay_wheel(frame, wheel_img, -angle, x=x0, y=y0, scale=scale)
