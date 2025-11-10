@@ -239,6 +239,7 @@ def steering_from_lanes(poly_L, poly_R, w, h, k1=40.0, k2=180.0, theta_max=STEER
 # ==========================
 
 def overlay_wheel(frame, wheel_rgba, angle_deg, x=20, y=20, alpha_mul=0.9, scale=0.6):
+    """Overlay rotated RGBA wheel image on frame using premultiplied alpha compositing."""
     h, w = frame.shape[:2]
     wh, ww = wheel_rgba.shape[:2]
 
@@ -267,6 +268,37 @@ def overlay_wheel(frame, wheel_rgba, angle_deg, x=20, y=20, alpha_mul=0.9, scale
     out = rgbp + roi*(1.0 - ar)             # composite in premul space
     frame[y:y+bh, x:x+bw] = (out*255.0).clip(0,255).astype(np.uint8)
     return frame
+
+
+def draw_steering_wheel(frame, wheel_img, angle, anchor=WHEEL_ANCHOR, offset=WHEEL_OFFSET, scale=WHEEL_SCALE):
+    """Draw steering wheel overlay on frame with anchor positioning.
+
+    Args:
+        frame: Input frame (BGR)
+        wheel_img: RGBA wheel image
+        angle: Steering angle in degrees
+        anchor: Position anchor ('lb','rb','lt','rt' - left/right + bottom/top)
+        offset: (dx, dy) offset from anchor in pixels
+        scale: Visual scale factor for the wheel
+
+    Returns:
+        Frame with wheel overlay
+    """
+    if wheel_img is None:
+        return frame
+
+    h, w = frame.shape[:2]
+    ww, wh = wheel_img.shape[1], wheel_img.shape[0]
+    dx, dy = offset
+    anchor = anchor.lower()
+
+    # Calculate x position
+    x0 = dx if 'l' in anchor else w - ww - dx
+
+    # Calculate y position
+    y0 = dy if 't' in anchor else h - wh - dy
+
+    return overlay_wheel(frame, wheel_img, -angle, x=x0, y=y0, scale=scale)
 
 # ==========================
 # Main
@@ -313,12 +345,7 @@ if __name__ == "__main__":
 
         # wheel overlay with anchor and centered bottom text
         if wheel is not None:
-            ww, wh = wheel.shape[1], wheel.shape[0]
-            dx, dy = WHEEL_OFFSET
-            anchor = WHEEL_ANCHOR.lower()
-            x0 = dx if 'l' in anchor else vis.shape[1] - ww - dx
-            y0 = dy if 't' in anchor else vis.shape[0] - wh - dy
-            vis = overlay_wheel(vis, wheel, -angle_draw, x=x0, y=y0, scale=WHEEL_SCALE)
+            vis = draw_steering_wheel(vis, wheel, angle_draw)
         # text centered at bottom
         status = f"{'RIGHT' if angle_draw>3 else 'LEFT' if angle_draw<-3 else 'STRAIGHT'} ({angle_draw:.1f} deg)"
         (font, fs, th) = (cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)
