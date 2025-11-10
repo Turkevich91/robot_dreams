@@ -173,14 +173,37 @@ def roi_mask(img, poly):
     return cv2.bitwise_and(img, m)
 
 
-def detect_lines(frame, poly):
+def detect_lines(frame, poly, ymin=None, ymax=None):
+    """Detect lane lines within ROI bounds.
+
+    Args:
+        frame: Input frame
+        poly: ROI polygon
+        ymin: Minimum Y coordinate (top of ROI). If None, calculate from poly
+        ymax: Maximum Y coordinate (bottom of ROI). If None, calculate from poly
+
+    Returns:
+        lines, masked
+    """
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5,5), 0)
     edges = cv2.Canny(blur, CANNY_LOW, CANNY_HIGH)
     masked = roi_mask(edges, poly)
-    lines = cv2.HoughLinesP(masked, 1, np.pi/180, HOUGH_THRESH,
+
+    # ИСПРАВЛЕНИЕ: ограничиваем область поиска линий по верхней и нижней границам ROI
+    # чтобы исключить капот и неинформативные части кадра
+    if ymin is None:
+        ymin = int(np.min(poly[:, 1]))
+    if ymax is None:
+        ymax = int(np.max(poly[:, 1]))
+
+    # Зануляем всё кроме полосы между ymin и ymax
+    masked_bounded = np.zeros_like(masked)
+    masked_bounded[ymin:ymax, :] = masked[ymin:ymax, :]
+
+    lines = cv2.HoughLinesP(masked_bounded, 1, np.pi/180, HOUGH_THRESH,
                             minLineLength=HOUGH_MINLEN, maxLineGap=HOUGH_MAXGAP)
-    return lines, masked
+    return lines, masked_bounded
 
 
 def fit_lane(lines):
@@ -204,9 +227,35 @@ def ema_poly(p_hat, p_prev, alpha=EMA_POLY):
     return alpha*p_hat + (1-alpha)*p_prev
 
 
-def lane_points_from_poly(p, h, ymin_ratio=LANE_YMIN_RATIO, n=80):
-    if p is None: return None
-    ys = np.linspace(int(ymin_ratio*h), h-1, n)
+def lane_points_from_poly(p, h, ymin=None, ymax=None, ymin_ratio=LANE_YMIN_RATIO, n=80):
+    """Generate lane curve points from polynomial within ROI bounds.
+
+    Args:
+        p: Polynomial coefficients [a, b, c] for x = a*y^2 + b*y + c
+        h: Frame height
+        ymin: Minimum Y coordinate for curve start (top of ROI)
+        ymax: Maximum Y coordinate for curve end (bottom of ROI)
+        ymin_ratio: Fallback ratio for min Y if ymin is not provided
+        n: Number of points to generate
+
+    Returns:
+        Array of (x, y) points or None if polynomial is None
+    """
+    if p is None:
+        return None
+
+    # ИСПРАВЛЕНИЕ: если ymin и ymax передан явно (из ROI), используем их
+    # иначе используем стандартный ratio для обратной совместимости
+    if ymin is None:
+        ymin = int(ymin_ratio * h)
+    if ymax is None:
+        ymax = h - 1
+
+    # Ограничиваем ymin и ymax в пределах кадра
+    ymin = np.clip(ymin, 0, h - 1)
+    ymax = np.clip(ymax, ymin + 1, h - 1)
+
+    ys = np.linspace(ymin, ymax, n)
     xs = p[0]*ys**2 + p[1]*ys + p[2]
     return np.int32(np.vstack([xs, ys]).T)
 
@@ -334,8 +383,12 @@ if __name__ == "__main__":
         _, roi_poly = detect_road_roi(frame, prev_roi, beta=0.3)
         prev_roi = roi_poly.copy()
 
+        # ИСПРАВЛЕНИЕ: вычисляем верхнюю и нижнюю границы ROI для ограничения поиска линий
+        roi_ymin = int(np.min(roi_poly[:, 1]))  # верхняя граница ROI
+        roi_ymax = int(np.max(roi_poly[:, 1]))  # нижняя граница ROI
+
         # lines and fits
-        lines, _ = detect_lines(frame, roi_poly)
+        lines, _ = detect_lines(frame, roi_poly, ymin=roi_ymin, ymax=roi_ymax)
         L_hat, R_hat = fit_lane(lines)
         polyL = ema_poly(L_hat, polyL)
         polyR = ema_poly(R_hat, polyR)
@@ -349,8 +402,10 @@ if __name__ == "__main__":
         # viz
         vis = frame.copy()
         cv2.polylines(vis, [roi_poly], True, (0,255,255), 2)
+
+        # ИСПРАВЛЕНИЕ: линии теперь рисуются в пределах ROI, исключая капот
         def draw_curve(p, color=(0,255,0)):
-            pts = lane_points_from_poly(p, vis.shape[0])
+            pts = lane_points_from_poly(p, vis.shape[0], ymin=roi_ymin, ymax=roi_ymax)
             if pts is not None:
                 cv2.polylines(vis, [pts], False, color, 6)
         draw_curve(polyL)
