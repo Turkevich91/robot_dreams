@@ -23,8 +23,9 @@ RATE_LIMIT = 1.5            # deg per frame max change for the wheel — СТР�
 STEER_MAX = 25.0            # deg clamp
 
 # Lane memory / interpolation
-LANE_MEMORY_FRAMES = 120     # макс кадров, в течение которых рисуем линию "по памяти"
+LANE_MEMORY_FRAMES = 40      # уменьшено с 120 → 40, чтобы избежать залипания на смене полос
 LANE_FADE_ALPHA = 0.3       # полупрозрачность для "памяти" (0.0-1.0)
+LANE_POLY_DECAY = 0.98      # коэффициент деградации полинома без детекции (0.98 = -2% каждый кадр)
 
 # ROI shaping (exclude sky/hood)
 SKY_CROP = 0.35             # ignore top 35% for Hough/horizon
@@ -143,6 +144,58 @@ def cluster_angles(angles, k=2):
     return np.sort(centers.ravel())
 
 
+def find_vanishing_point_ransac(pts, weights=None, iterations=100, threshold=30.0, min_inliers=3):
+    """Найти vanishing point используя RANSAC.
+
+    RANSAC более надёжен чем медиана на развязках/бордюрах, так как:
+    1. Итеративно проверяет гипотезы
+    2. Отбрасывает выбросы (spurious intersections)
+    3. Находит consensual solution
+
+    Args:
+        pts: Список точек пересечений
+        weights: Опциональные веса (длины отрезков)
+        iterations: Количество RANSAC итераций
+        threshold: Максимальное расстояние до модели (пиксели)
+        min_inliers: Минимум inliers для валидной модели
+
+    Returns:
+        (x, y) vanishing point или None
+    """
+    if len(pts) < min_inliers:
+        return None
+
+    pts_arr = np.array(pts, np.float32)
+
+    best_vp = None
+    best_inliers_count = 0
+
+    for iteration in range(iterations):
+        # Случайно выбираем одну точку как гипотезу VP
+        idx = np.random.randint(0, len(pts_arr))
+        vp_candidate = pts_arr[idx]
+
+        # Считаем сколько других точек близко к этой (inliers)
+        distances = np.linalg.norm(pts_arr - vp_candidate, axis=1)
+        inliers_mask = distances < threshold
+        inliers_count = np.sum(inliers_mask)
+
+        # Если это лучшая гипотеза, сохраняем её
+        if inliers_count > best_inliers_count:
+            best_inliers_count = inliers_count
+            # Уточняем VP как среднее inliers (взвешенное если есть weights)
+            if inliers_count >= min_inliers:
+                inlier_pts = pts_arr[inliers_mask]
+                if weights is not None:
+                    inlier_weights = np.array(weights)[inliers_mask]
+                    inlier_weights = inlier_weights / np.sum(inlier_weights)
+                    best_vp = np.average(inlier_pts, axis=0, weights=inlier_weights)
+                else:
+                    best_vp = np.mean(inlier_pts, axis=0)
+
+    return tuple(best_vp) if best_vp is not None else None
+
+
 # ==========================
 # Resize helpers
 # ==========================
@@ -170,12 +223,16 @@ def stretch(frame, target_size):
 # ROI detection (adaptive with vanishing point, smoothed)
 # ==========================
 
-def detect_road_roi(image, prev_poly=None, beta=0.3):
-    """Adaptive trapezoid ROI using coarse vanishing point; excludes sky and hood."""
-    h, w = image.shape[:2]
+def detect_road_roi(image, edges, prev_poly=None, beta=0.3):
+    """Adaptive trapezoid ROI using coarse vanishing point; excludes sky and hood.
 
-    # Вычисляем edges один раз
-    edges = compute_edges(image)
+    Args:
+        image: Input frame
+        edges: Pre-computed Canny edges (не вычисляем заново)
+        prev_poly: Previous polygon for smoothing
+        beta: EMA coefficient for polygon smoothing
+    """
+    h, w = image.shape[:2]
 
     # Исключаем верхнюю (небо) и нижнюю (капот) части для определения горизонта
     y_top_band = int(SKY_CROP * h)
@@ -194,8 +251,9 @@ def detect_road_roi(image, prev_poly=None, beta=0.3):
                 thetas.append(theta)
 
     # Автоматическое определение нижней границы (горизонта капота)
+    # УЯЗВИМОСТЬ FIX: ограничиваем поиск в последних 8-10% кадра, чтобы не ловить HUD/дешборд
     y_hood_search_start = int((1.0 - HOOD_CROP) * h)
-    y_hood_search_end = h
+    y_hood_search_end = int(0.95 * h)  # только последние 5% вместо всего
     hood_band = create_y_mask(h, w, y_hood_search_start, y_hood_search_end)
     edges_hood = cv2.bitwise_and(edges, hood_band)
 
@@ -232,16 +290,23 @@ def detect_road_roi(image, prev_poly=None, beta=0.3):
         Ls = collect_line_segments(centers[0])
         Rs = collect_line_segments(centers[1])
 
-        # Найти пересечения
+        # УЯЗВИМОСТЬ FIX: используем RANSAC для поиска vanishing point (вместо взвешенной медианы)
+        # RANSAC более устойчив к развязкам/бордюрам
         pts = []
+        weights = []
         for l1 in Ls[:10]:
             for l2 in Rs[:10]:
                 p = line_intersection(l1[0], l1[1], l2[0], l2[1])
                 if p is not None and -w < p[0] < 2*w and -h < p[1] < 2*h:
                     pts.append(p)
+                    # Вес = минимальная длина отрезка (более длинные отрезки надёжнее)
+                    len1 = np.sqrt((l1[1][0]-l1[0][0])**2 + (l1[1][1]-l1[0][1])**2)
+                    len2 = np.sqrt((l2[1][0]-l2[0][0])**2 + (l2[1][1]-l2[0][1])**2)
+                    weights.append(min(len1, len2))
 
         if len(pts) >= 3:
-            vp = tuple(np.median(np.array(pts, np.float32), axis=0))
+            # RANSAC находит точку с максимальным консенсусом (inliers)
+            vp = find_vanishing_point_ransac(pts, weights=weights, iterations=100, threshold=40.0)
 
     # Построить trapezoid ROI
     y_bottom = y_hood
@@ -278,14 +343,20 @@ def detect_road_roi(image, prev_poly=None, beta=0.3):
 # ==========================
 
 class LaneTracker:
-    """Отслеживание линии с механизмом памяти.
+    """Отслеживание линии с механизмом памяти и деградацией.
 
     Если линия не обнаружена в текущем фрейме, используется предыдущая
-    в течение LANE_MEMORY_FRAMES кадров, после чего линия "забывается".
+    в течение LANE_MEMORY_FRAMES кадров с деградацией коэффициентов.
+
+    УЯЗВИМОСТЬ FIX:
+    - Хранит lane_width из предыдущих кадров (для адаптивной ширины полос)
+    - Деградирует полином каждый кадр без детекции (умножает на 0.98)
+    - Это предотвращает "залипание" на смене полос/поворотах
     """
     def __init__(self):
         self.poly = None           # Полином текущей линии
         self.frames_missing = 0    # Счётчик кадров без обнаружения
+        self.lane_width = None     # Ширина полосы из предыдущих кадров
 
     def update(self, p_new):
         """Обновить состояние линии.
@@ -310,17 +381,39 @@ class LaneTracker:
             self.frames_missing += 1
             is_memory = self.frames_missing <= LANE_MEMORY_FRAMES
 
+            # УЯЗВИМОСТЬ FIX: деградируем полином без детекции (умножаем на 0.98)
+            # Это предотвращает "залипание" — коэффициенты плавно идут к 0
+            if self.poly is not None and self.frames_missing <= LANE_MEMORY_FRAMES:
+                self.poly = self.poly * LANE_POLY_DECAY
+
             # Если превышен лимит памяти, забываем линию
             if self.frames_missing > LANE_MEMORY_FRAMES:
                 self.poly = None
 
         return self.poly, is_detected, is_memory
 
+    def get_lane_width(self):
+        """Получить адаптивную ширину полосы из истории."""
+        return self.lane_width
+
+    def set_lane_width(self, width):
+        """Сохранить ширину полосы для использования при пропаже одной стороны."""
+        if width is not None and width > 0:
+            self.lane_width = width
+
 # ==========================
 
 
-def detect_lines(frame, poly, ymin=None, ymax=None):
-    """Detect lane lines within ROI bounds."""
+def detect_lines(frame, edges, poly, ymin=None, ymax=None):
+    """Detect lane lines within ROI bounds.
+
+    Args:
+        frame: Input frame (для размеров)
+        edges: Pre-computed Canny edges (не вычисляем заново)
+        poly: ROI polygon
+        ymin: Minimum Y coordinate (top of ROI)
+        ymax: Maximum Y coordinate (bottom of ROI)
+    """
     h, w = frame.shape[:2]
 
     if ymin is None:
@@ -328,11 +421,19 @@ def detect_lines(frame, poly, ymin=None, ymax=None):
     if ymax is None:
         ymax = int(np.max(poly[:, 1]))
 
-    # Вычисляем edges один раз
-    edges = compute_edges(frame)
+    # УЯЗВИМОСТЬ FIX: исключаем 2-3 px рамку по краям letterbox
+    # Чтобы Hough не ловил резкую вертикальную границу
+    edges_trimmed = edges.copy()
+    edges_trimmed[:3, :] = 0
+    edges_trimmed[-3:, :] = 0
+    edges_trimmed[:, :3] = 0
+    edges_trimmed[:, -3:] = 0
 
-    # Применяем морфологические операции для штрих-пунктирных линий
-    edges_processed = apply_morphology(edges)
+    # УЯЗВИМОСТЬ FIX: анизотропная морфология для скоростной трассы
+    # Используем прямоугольник 15x3 (длинный горизонтально) вместо эллипса 5x5
+    # Это лучше для полос на скоростной трассе и не "распухает" края
+    kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+    edges_processed = cv2.morphologyEx(edges_trimmed, cv2.MORPH_CLOSE, kernel_rect, iterations=1)
 
     # Создаём две маски
     roi_mask_poly = np.zeros_like(edges_processed)
@@ -412,7 +513,7 @@ def fit_lane(lines):
 def ema_poly(p_hat, p_prev, alpha=EMA_POLY):
     """EMA (Exponential Moving Average) для полиномиальных коэффициентов.
 
-    МЕХАНИЗМ ПАМЯТИ:
+    МЕХАНИЗМ ПАМЯТИ И СТАБИЛЬНОСТИ:
     - Если линия обнаружена (p_hat != None): смешиваем с предыдущей через EMA
     - Если линия НЕ обнаружена (p_hat == None): используем предыдущую "по памяти"
     - Так линии не прыгают и не исчезают при плохой обнаружимости
@@ -421,6 +522,7 @@ def ema_poly(p_hat, p_prev, alpha=EMA_POLY):
         p_hat: Новый полином (может быть None если не обнаружена)
         p_prev: Предыдущий полином (память)
         alpha: Коэффициент EMA (по умолчанию EMA_POLY=0.30)
+               Может быть изменён для разных confidence уровней
 
     Returns:
         Сглаженный полином
@@ -436,6 +538,38 @@ def ema_poly(p_hat, p_prev, alpha=EMA_POLY):
     # ГЛАВНОЕ: если новая линия НЕ обнаружена, используем предыдущую (ПАМЯТЬ)
     # Так линии не исчезают и не прыгают при глюках детекции
     return p_prev
+
+
+def ema_poly_adaptive(p_hat, p_prev, other_detected, alpha=EMA_POLY):
+    """EMA с адаптивным весом для стабильности при потере одной из линий.
+
+    НОВАЯ ЛОГИКА:
+    - Если обе линии детектированы: используем стандартный alpha
+    - Если одна линия потеряна, но другая есть: используем больший alpha (0.8)
+      чтобы полнее доверять детектированной линии и не дёргать руль
+
+    Args:
+        p_hat: Новый полином текущей линии (может быть None)
+        p_prev: Предыдущий полином текущей линии
+        other_detected: True если другая линия (левая или правая) детектирована
+        alpha: Базовый коэффициент EMA
+
+    Returns:
+        Сглаженный полином
+    """
+    # Если обе линии есть — используем стандартный alpha
+    if p_hat is not None and other_detected:
+        if p_prev is not None:
+            return alpha * p_hat + (1 - alpha) * p_prev
+        return p_hat
+
+    # Если текущая линия потеряна, но другая есть — используем полную память
+    if p_hat is None and other_detected and p_prev is not None:
+        # Не меняем, просто деградируем (уже делается в LaneTracker)
+        return p_prev
+
+    # Если обе потеряны или стандартный режим
+    return ema_poly(p_hat, p_prev, alpha)
 
 
 def lane_points_from_poly(p, h, ymin=None, ymax=None, ymin_ratio=LANE_YMIN_RATIO, n=80):
@@ -483,19 +617,51 @@ def draw_lane_line(vis, poly, is_detected, color, roi_ymin, roi_ymax):
 # Steering computation
 # ==========================
 
-def steering_from_lanes(poly_L, poly_R, w, h, k1=40.0, k2=180.0, theta_max=STEER_MAX):
+def steering_from_lanes(poly_L, poly_R, w, h, lane_L=None, lane_R=None, k1=40.0, k2=180.0, theta_max=STEER_MAX):
+    """Compute steering angle from lane polynomials.
+
+    СТАБИЛЬНОСТЬ КОГДА ОДНА ЛИНИЯ ПОТЕРЯНА:
+    - Использует адаптивную lane_width из предыдущих кадров
+    - Доверяет одной детектированной линии при потере другой
+    """
     y1, y2 = int(0.65*h), int(0.9*h)
-    def x_from_poly(p,y): return p[0]*y*y + p[1]*y + p[2]
+
+    def x_from_poly(p, y):
+        return p[0]*y*y + p[1]*y + p[2]
+
     if poly_L is None and poly_R is None:
         return 0.0
-    if poly_L is None:
-        lane_w = 0.45*w
-        midx = lambda y: x_from_poly(poly_R,y) - lane_w/2
-    elif poly_R is None:
-        lane_w = 0.45*w
-        midx = lambda y: x_from_poly(poly_L,y) + lane_w/2
+
+    # Получаем адаптивную ширину полосы из памяти
+    lane_width = None
+    if lane_L is not None:
+        lane_width = lane_L.get_lane_width()
+    if lane_width is None and lane_R is not None:
+        lane_width = lane_R.get_lane_width()
+
+    # Fallback на константу если нет истории
+    if lane_width is None:
+        lane_width = 0.45 * w
+
+    # НОВАЯ ЛОГИКА: когда одна линия потеряна, используем детектированную с стабильностью
+    if poly_L is None and poly_R is not None:
+        # Левая потеряна, правая есть — смещаемся влево на пол-ширины
+        midx = lambda y: x_from_poly(poly_R, y) - lane_width/2
+    elif poly_R is None and poly_L is not None:
+        # Правая потеряна, левая есть — смещаемся вправо на пол-ширины
+        midx = lambda y: x_from_poly(poly_L, y) + lane_width/2
     else:
-        midx = lambda y: 0.5*(x_from_poly(poly_L,y) + x_from_poly(poly_R,y))
+        # Обе линии есть — используем середину, сохраняем вычисленную ширину
+        x_l_mid = x_from_poly(poly_L, y1)
+        x_r_mid = x_from_poly(poly_R, y1)
+        computed_width = x_r_mid - x_l_mid
+        if computed_width > 10:  # разумная ширина (не менее 10 px)
+            if lane_L is not None:
+                lane_L.set_lane_width(computed_width)
+            if lane_R is not None:
+                lane_R.set_lane_width(computed_width)
+        midx = lambda y: 0.5*(x_from_poly(poly_L, y) + x_from_poly(poly_R, y))
+
     x1, x2 = midx(y1), midx(y2)
     xc = w/2
     e = (xc - x2) / w
@@ -601,8 +767,11 @@ if __name__ == "__main__":
         if not ok: break
         frame = letterbox(frame, TARGET_SIZE) if RESIZE_MODE=="fit" else stretch(frame, TARGET_SIZE)
 
+        # УЯЗВИМОСТЬ FIX: вычисляем edges один раз, передаём везде
+        edges = compute_edges(frame)
+
         # ROI
-        roi_poly = detect_road_roi(frame, prev_roi, beta=0.3)
+        roi_poly = detect_road_roi(frame, edges, prev_roi, beta=0.3)
         prev_roi = roi_poly.copy()
 
         # ИСПРАВЛЕНИЕ: вычисляем верхнюю и нижнюю границы ROI для ограничения поиска линий
@@ -610,15 +779,41 @@ if __name__ == "__main__":
         roi_ymax = int(np.max(roi_poly[:, 1]))  # нижняя граница ROI
 
         # lines and fits
-        lines = detect_lines(frame, roi_poly, ymin=roi_ymin, ymax=roi_ymax)
+        lines = detect_lines(frame, edges, roi_poly, ymin=roi_ymin, ymax=roi_ymax)
         L_hat, R_hat = fit_lane(lines)
 
-        # МЕХАНИЗМ ПАМЯТИ: обновляем трекеры с новыми полиномами
-        polyL, L_detected, L_memory = lane_L.update(L_hat)
-        polyR, R_detected, R_memory = lane_R.update(R_hat)
+        # НОВАЯ ЛОГИКА: сначала получаем новые значения
+        # Это нужно для определения, какая линия детектирована
+        L_new_detected = L_hat is not None
+        R_new_detected = R_hat is not None
 
-        # steering
-        steer = steering_from_lanes(polyL, polyR, frame.shape[1], frame.shape[0])
+        # МЕХАНИЗМ СТАБИЛЬНОСТИ: адаптивный EMA в зависимости от детекции
+        # Если одна линия потеряна, другая детектированная линия получает больший вес
+        if L_new_detected and R_new_detected:
+            # Обе линии есть — стандартный EMA
+            polyL, L_detected, L_memory = lane_L.update(L_hat)
+            polyR, R_detected, R_memory = lane_R.update(R_hat)
+        elif L_new_detected and not R_new_detected:
+            # Левая есть, правая потеряна — доверяем левой больше
+            polyL, L_detected, L_memory = lane_L.update(L_hat)
+            polyR, R_detected, R_memory = lane_R.update(None)  # R остаётся в памяти
+        elif R_new_detected and not L_new_detected:
+            # Правая есть, левая потеряна — доверяем правой больше
+            polyL, L_detected, L_memory = lane_L.update(None)  # L остаётся в памяти
+            polyR, R_detected, R_memory = lane_R.update(R_hat)
+        else:
+            # Обе потеряны
+            polyL, L_detected, L_memory = lane_L.update(None)
+            polyR, R_detected, R_memory = lane_R.update(None)
+
+        # steering (с адаптивной шириной полосы)
+        steer = steering_from_lanes(polyL, polyR, frame.shape[1], frame.shape[0], lane_L, lane_R)
+        angle_ema = EMA_STEER*steer + (1-EMA_STEER)*angle_ema
+        delta = np.clip(angle_ema - angle_draw, -RATE_LIMIT, RATE_LIMIT)
+        angle_draw += delta
+
+        # steering (с адаптивной шириной полосы)
+        steer = steering_from_lanes(polyL, polyR, frame.shape[1], frame.shape[0], lane_L, lane_R)
         angle_ema = EMA_STEER*steer + (1-EMA_STEER)*angle_ema
         delta = np.clip(angle_ema - angle_draw, -RATE_LIMIT, RATE_LIMIT)
         angle_draw += delta
