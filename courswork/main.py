@@ -24,7 +24,7 @@ STEER_MAX = 25.0            # deg clamp
 
 # ROI shaping (exclude sky/hood)
 SKY_CROP = 0.35             # ignore top 35% for Hough/horizon
-HOOD_CROP = 0.30            # ignore bottom 30% (car hood/dashboard)
+HOOD_CROP = 0.315            # ignore bottom 33% (car hood/dashboard)
 ROI_TOP_HALF_WIDTH_RATIO = 0.30  # top half-width ratio of ROI
 BOTTOM_MARGIN_X_RATIO   = 0.03   # left/right margin at bottom
 
