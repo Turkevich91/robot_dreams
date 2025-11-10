@@ -63,23 +63,31 @@ def stretch(frame, target_size):
 
 def detect_road_roi(image, prev_poly=None, beta=0.3):
     """Adaptive trapezoid ROI using coarse vanishing point; excludes sky and hood.
+
+    НАЗНАЧЕНИЕ: Определить область дороги (trapezoid ROI) на основе горизонта и линий горизонта.
+    Это отдельная от detect_lines задача:
+    - detect_road_roi → ищет горизонтальные/диагональные линии для определения горизонта
+    - detect_lines → ищет вертикальные линии для полос разметки
+
     Returns (mask, poly).
     """
     h, w = image.shape[:2]
 
-    # Base edges
+    # Base edges: вычисляем границы один раз для определения горизонта
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     gray = cv2.GaussianBlur(gray, (5,5), 0)
     edges = cv2.Canny(gray, CANNY_LOW, CANNY_HIGH, L2gradient=True)
 
-    # Exclude sky and hood for Hough/horizon
+    # Исключаем верхнюю (небо) и нижнюю (капот) части для определения горизонта
+    # ПРИМЕЧАНИЕ: SKY_CROP и HOOD_CROP здесь используются для поиска горизонта,
+    # а в detect_lines они будут использованы для поиска линий полос
     y_top_band = int(SKY_CROP * h)
     y_bot_band = int((1.0 - HOOD_CROP) * h)
     band = np.zeros_like(edges)
     band[y_top_band:y_bot_band, :] = 255
     edges_band = cv2.bitwise_and(edges, band)
 
-    # Hough lines on the band only
+    # Hough lines on the band only — ищем линии горизонта для vanishing point
     lines = cv2.HoughLines(edges_band, 1, np.pi/180, 120)
     thetas = []
     if lines is not None:
@@ -183,27 +191,35 @@ def detect_lines(frame, poly, ymin=None, ymax=None):
         ymax: Maximum Y coordinate (bottom of ROI). If None, calculate from poly
 
     Returns:
-        lines, masked
+        lines, masked_edges (edges masked to ROI bounds)
     """
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    blur = cv2.GaussianBlur(gray, (5,5), 0)
-    edges = cv2.Canny(blur, CANNY_LOW, CANNY_HIGH)
-    masked = roi_mask(edges, poly)
+    h, w = frame.shape[:2]
 
-    # ИСПРАВЛЕНИЕ: ограничиваем область поиска линий по верхней и нижней границам ROI
-    # чтобы исключить капот и неинформативные части кадра
+    # ОПТИМИЗАЦИЯ: вычисляем границы ROI один раз
     if ymin is None:
         ymin = int(np.min(poly[:, 1]))
     if ymax is None:
         ymax = int(np.max(poly[:, 1]))
 
-    # Зануляем всё кроме полосы между ymin и ymax
-    masked_bounded = np.zeros_like(masked)
-    masked_bounded[ymin:ymax, :] = masked[ymin:ymax, :]
+    # Создаём маску для ограничения по Y координатам (исключаем капот и верхнюю часть)
+    y_bound_mask = np.zeros((h, w), np.uint8)
+    y_bound_mask[ymin:ymax, :] = 255
 
-    lines = cv2.HoughLinesP(masked_bounded, 1, np.pi/180, HOUGH_THRESH,
+    # Вычисляем edges один раз
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    edges = cv2.Canny(blur, CANNY_LOW, CANNY_HIGH)
+
+    # ЛОГИКА: применяем две маски одновременно:
+    # 1. roi_mask(edges, poly) — маска полигона ROI (трапеция)
+    # 2. y_bound_mask — маска по Y координатам (исключает капот и небо)
+    roi_masked = roi_mask(edges, poly)
+    edges_bounded = cv2.bitwise_and(roi_masked, y_bound_mask)
+
+    # Поиск линий в ограниченной области
+    lines = cv2.HoughLinesP(edges_bounded, 1, np.pi/180, HOUGH_THRESH,
                             minLineLength=HOUGH_MINLEN, maxLineGap=HOUGH_MAXGAP)
-    return lines, masked_bounded
+    return lines, edges_bounded
 
 
 def fit_lane(lines):
