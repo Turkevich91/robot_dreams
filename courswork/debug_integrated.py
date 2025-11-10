@@ -15,7 +15,7 @@ from datetime import datetime
 
 # Импортируем основной код
 from main import (
-    letterbox, compute_edges, detect_road_roi, detect_lines, fit_lane,
+    letterbox, compute_edges, detect_road_roi, detect_lines, fit_lane, resize_frame,
     TARGET_SIZE, RESIZE_MODE, CANNY_LOW, CANNY_HIGH,
     HOUGH_THRESH, HOUGH_MINLEN, HOUGH_MAXGAP,
     EMA_POLY, EMA_STEER, RATE_LIMIT, STEER_MAX,
@@ -85,7 +85,7 @@ class DebugMode:
         self.lane_L = LaneTracker()
         self.lane_R = LaneTracker()
         self.angle_ema = 0.0
-        self.angle_draw = 0.0
+        self.angle_draw = 0.0  # Текущий угол руля для отрисовки
 
         # Инициализируем папку скриншотов
         self.screenshots_dir = self._init_screenshots_dir()
@@ -130,18 +130,18 @@ class DebugMode:
             print(f"  {key} - {name:15} [{status}] - {desc}")
 
         print("\n⌨️  НАВИГАЦИЯ:")
-        print("  → / ←           - 1 кадр")
-        print("  , / .           - 1 секунда")
-        print("  < / >           - 10 секунд")
+        print("  [ / ]           - 1 кадр назад/вперёд")
+        print("  ; / '           - 1 секунда назад/вперёд")
+        print("  , / .           - 10 секунд назад/вперёд")
+        print("  0               - начало видео")
         print("  SPACE           - пауза/воспроизведение")
-        print("  0 / E           - начало/конец видео")
 
         print("\n📷 СКРИНШОТЫ:")
         print("  s - сохранить текущий кадр")
 
         print("\n📋 ДРУГОЕ:")
         print("  h - показать справку")
-        print("  q - выход")
+        print("  ESC - выход")
         print("="*70 + "\n")
 
     def set_frame(self, frame_num):
@@ -153,13 +153,53 @@ class DebugMode:
         """Отрендерить кадр: ФИЛЬТР + вспомогательные линии"""
 
         # ============ ОБРАБОТКА ============
-        frame_resized = letterbox(frame, TARGET_SIZE) if RESIZE_MODE == "fit" else cv2.resize(frame, TARGET_SIZE)
+        frame_resized = resize_frame(frame, TARGET_SIZE, RESIZE_MODE)
         gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
         gray = cv2.GaussianBlur(gray, (5, 5), 0)
         edges = cv2.Canny(gray, CANNY_LOW, CANNY_HIGH, L2gradient=True)
         roi_poly = detect_road_roi(frame_resized, edges, beta=0.3)
 
         h, w = frame_resized.shape[:2]
+        roi_ymin = int(np.min(roi_poly[:, 1]))
+        roi_ymax = int(np.max(roi_poly[:, 1]))
+
+        # Детектируем линии один раз для всех операций
+        lines = detect_lines(frame_resized, edges, roi_poly, ymin=roi_ymin, ymax=roi_ymax)
+        result = fit_lane(lines)
+        if len(result) == 4:
+            L_hat, R_hat, conf_L, conf_R = result
+        else:
+            L_hat, R_hat = result
+            conf_L = conf_R = 0.0
+
+        # ============ ВЫЧИСЛЯЕМ УГОЛ ПОВОРОТА (независимо от флагов) ============
+        # Этот угол используется для отрисовки руля
+        if L_hat is not None or R_hat is not None:
+            y_ref = roi_ymax  # Нижняя точка ROI (где мы находимся)
+
+            if L_hat is not None and R_hat is not None:
+                # Если обе линии есть - берём среднее
+                # dy/dx = 2*a*y + b (производная полинома)
+                slope_L = 2 * L_hat[0] * y_ref + L_hat[1]
+                slope_R = 2 * R_hat[0] * y_ref + R_hat[1]
+                avg_slope = (slope_L + slope_R) / 2
+            elif L_hat is not None:
+                # Если только левая - используем её
+                avg_slope = 2 * L_hat[0] * y_ref + L_hat[1]
+            else:
+                # Если только правая - используем её
+                avg_slope = 2 * R_hat[0] * y_ref + R_hat[1]
+
+            # Преобразуем уклон в угол (в градусах)
+            # Угол = arctan(уклон) * 180/pi
+            angle_rad = np.arctan(avg_slope)
+            angle_deg = np.degrees(angle_rad)
+
+            # Применяем EMA сглаживание для плавности
+            self.angle_ema = EMA_STEER * angle_deg + (1 - EMA_STEER) * self.angle_ema
+
+            # Ограничиваем угол в разумные пределы
+            self.angle_draw = np.clip(self.angle_ema, -STEER_MAX, STEER_MAX)
 
         # ============ ВЫБИРАЕМ БАЗОВЫЙ ФИЛЬТР ============
         if self.current_filter == '1':  # ORIGINAL
@@ -201,16 +241,6 @@ class DebugMode:
 
         # POLYFIT (подогнанные кривые)
         if self.show_overlays['p']:
-            roi_ymin = int(np.min(roi_poly[:, 1]))
-            roi_ymax = int(np.max(roi_poly[:, 1]))
-            lines = detect_lines(frame_resized, edges, roi_poly, ymin=roi_ymin, ymax=roi_ymax)
-            result = fit_lane(lines)
-            if len(result) == 4:
-                L_hat, R_hat, conf_L, conf_R = result
-            else:
-                L_hat, R_hat = result
-                conf_L = conf_R = 0.0
-
             if L_hat is not None:
                 ys = np.linspace(roi_ymin, roi_ymax, 100)
                 xs = L_hat[0]*ys**2 + L_hat[1]*ys + L_hat[2]
@@ -225,8 +255,8 @@ class DebugMode:
 
         # WHEEL (руль)
         if self.show_overlays['w'] and self.wheel_img is not None:
-            # TODO: интегрировать отрисовку руля
-            pass
+            display = draw_steering_wheel(display, self.wheel_img, self.angle_draw,
+                                         anchor=WHEEL_ANCHOR, offset=WHEEL_OFFSET, scale=WHEEL_SCALE)
 
         # TEXT (информационный текст)
         status = "⏸ PAUSE" if self.paused else "▶ PLAY"
@@ -249,8 +279,12 @@ class DebugMode:
     def handle_key(self, key):
         """Обработать нажатие клавиши"""
 
-        if key == ord('q'):
-            return False  # Выход
+        if key == 255 or key == -1:
+            # Ни одна клавиша не нажата
+            return True
+
+        if key == 27:  # ESC - выход
+            return False
 
         elif key == ord('h') or key == ord('H'):
             self.print_help()
@@ -260,44 +294,44 @@ class DebugMode:
             status = "⏸ PAUSE" if self.paused else "▶ PLAY"
             print(f"  {status}")
 
-        elif key == 81:  # LEFT ARROW - 1 кадр назад
+        # НАВИГАЦИЯ - КАДРЫ [ / ]
+        elif key == ord('['):  # [ - 1 кадр назад
             self.set_frame(self.frame_num - 1)
             print(f"  ← Frame {self.frame_num}")
 
-        elif key == 83:  # RIGHT ARROW - 1 кадр вперёд
+        elif key == ord(']'):  # ] - 1 кадр вперёд
             self.set_frame(self.frame_num + 1)
             print(f"  → Frame {self.frame_num}")
 
-        elif key == ord(','):  # < - 1 секунда назад
+        # НАВИГАЦИЯ - СЕКУНДЫ ; / '
+        elif key == ord(';'):  # ; - 1 секунда назад
             self.set_frame(self.frame_num - int(self.fps))
-            print(f"  ←← -1 second")
+            print(f"  ←← -1 second (frame {self.frame_num})")
 
-        elif key == ord('.'):  # > - 1 секунда вперёд
+        elif key == ord("'"):  # ' - 1 секунда вперёд
             self.set_frame(self.frame_num + int(self.fps))
-            print(f"  →→ +1 second")
+            print(f"  →→ +1 second (frame {self.frame_num})")
 
-        elif key == ord('<'):  # Shift+< - 10 секунд назад
+        # НАВИГАЦИЯ - 10 СЕКУНД , / .
+        elif key == ord(','):  # , - 10 секунд назад
             self.set_frame(self.frame_num - int(self.fps * 10))
-            print(f"  ←←← -10 seconds")
+            print(f"  ←←← -10 seconds (frame {self.frame_num})")
 
-        elif key == ord('>'):  # Shift+> - 10 секунд вперёд
+        elif key == ord('.'):  # . - 10 секунд вперёд
             self.set_frame(self.frame_num + int(self.fps * 10))
-            print(f"  →→→ +10 seconds")
+            print(f"  →→→ +10 seconds (frame {self.frame_num})")
 
-        elif key == ord('0'):  # Начало видео
+        # НАВИГАЦИЯ - НАЧАЛО 0
+        elif key == ord('0'):  # 0 - начало видео
             self.set_frame(0)
-            print(f"  ⏮ Start")
-
-        elif key == ord('e') or key == ord('E'):  # Конец видео
-            self.set_frame(self.total_frames - 1)
-            print(f"  ⏭ End")
+            print(f"  ⏮ Start (frame 0)")
 
         # ============ ФИЛЬТРЫ (1-3) ============
         elif key in [ord(str(i)) for i in range(1, 4)]:
             filter_key = str(chr(key))
             if filter_key in DEBUG_FILTERS:
                 self.current_filter = filter_key
-                print(f"  Filter: {DEBUG_FILTERS[filter_key][0]} ({DEBUG_FILTERS[filter_key][1]})")
+                print(f"  Filter: {DEBUG_FILTERS[filter_key][0]}")
 
         # ============ ВСПОМОГАТЕЛЬНЫЕ ЛИНИИ ============
         elif chr(key) in self.show_overlays:
@@ -308,7 +342,6 @@ class DebugMode:
 
         # ============ СКРИНШОТЫ ============
         elif key == ord('s') or key == ord('S'):
-            # Скриншот будет сохранён в run() после вызова этого метода
             return "screenshot"
 
         return True  # Продолжать

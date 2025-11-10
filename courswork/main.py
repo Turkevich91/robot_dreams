@@ -219,6 +219,23 @@ def stretch(frame, target_size):
     tw, th = target_size
     return cv2.resize(frame, (tw, th), interpolation=cv2.INTER_AREA)
 
+
+def resize_frame(frame, target_size=TARGET_SIZE, mode=RESIZE_MODE):
+    """Resize frame according to mode.
+
+    Args:
+        frame: Input frame
+        target_size: Target size (width, height)
+        mode: "fit" for letterbox, "stretch" for direct resize
+
+    Returns:
+        Resized frame
+    """
+    if mode == "fit":
+        return letterbox(frame, target_size)
+    else:
+        return stretch(frame, target_size)
+
 # ==========================
 # ROI detection (adaptive with vanishing point, smoothed)
 # ==========================
