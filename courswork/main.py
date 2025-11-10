@@ -289,14 +289,17 @@ def draw_steering_wheel(frame, wheel_img, angle, anchor=WHEEL_ANCHOR, offset=WHE
 
     h, w = frame.shape[:2]
     ww, wh = wheel_img.shape[1], wheel_img.shape[0]
+    # Account for scaling when calculating scaled dimensions
+    scaled_ww = int(ww * scale)
+    scaled_wh = int(wh * scale)
     dx, dy = offset
     anchor = anchor.lower()
 
-    # Calculate x position
-    x0 = dx if 'l' in anchor else w - ww - dx
+    # Calculate x position based on scaled wheel width
+    x0 = dx if 'l' in anchor else w - scaled_ww - dx
 
-    # Calculate y position
-    y0 = dy if 't' in anchor else h - wh - dy
+    # Calculate y position based on scaled wheel height
+    y0 = dy if 't' in anchor else h - scaled_wh - dy
 
     return overlay_wheel(frame, wheel_img, -angle, x=x0, y=y0, scale=scale)
 
