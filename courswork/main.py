@@ -23,7 +23,7 @@ RATE_LIMIT = 1.5            # deg per frame max change for the wheel — СТР�
 STEER_MAX = 25.0            # deg clamp
 
 # Lane memory / interpolation
-LANE_MEMORY_FRAMES = 40      # уменьшено с 120 → 40, чтобы избежать залипания на смене полос
+LANE_MEMORY_FRAMES = 20      # уменьшено с 120 → 40 → 20, чтобы избежать залипания на смене полос
 LANE_FADE_ALPHA = 0.3       # полупрозрачность для "памяти" (0.0-1.0)
 LANE_POLY_DECAY = 0.98      # коэффициент деградации полинома без детекции (0.98 = -2% каждый кадр)
 
