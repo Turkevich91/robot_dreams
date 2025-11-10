@@ -97,6 +97,38 @@ def detect_road_roi(image, prev_poly=None, beta=0.3):
             if 20 < deg < 80 or 100 < deg < 160:
                 thetas.append(theta)
 
+    # АВТОМАТИЧЕСКОЕ ОПРЕДЕЛЕНИЕ НИЖНЕЙ ГРАНИЦЫ (горизонта капота)
+    # Ищем горизонтальные линии в нижней части кадра (капот/приборная панель)
+    y_hood_search_start = int((1.0 - HOOD_CROP) * h)
+    y_hood_search_end = h
+    hood_band = np.zeros_like(edges)
+    hood_band[y_hood_search_start:y_hood_search_end, :] = 255
+    edges_hood = cv2.bitwise_and(edges, hood_band)
+
+    hood_lines = cv2.HoughLines(edges_hood, 1, np.pi/180, 100)
+    hood_ys = []
+    if hood_lines is not None:
+        for rho_theta in hood_lines[:100]:
+            rho, theta = rho_theta[0]
+            deg = np.degrees(theta)
+            # Ищем почти горизонтальные линии (близко к 0 или 180 градусам)
+            if deg < 15 or deg > 165:
+                # Вычисляем Y координату линии в центре кадра
+                a = np.cos(theta)
+                b = np.sin(theta)
+                if abs(b) > 0.01:  # избегаем деления на 0
+                    x_center = w / 2
+                    y_at_center = (rho - a * x_center) / b
+                    if y_hood_search_start <= y_at_center <= y_hood_search_end:
+                        hood_ys.append(y_at_center)
+
+    # Определяем горизонт капота как медиану найденных горизонтальных линий
+    if len(hood_ys) >= 2:
+        y_hood = int(np.median(hood_ys))
+    else:
+        # Fallback: используем HOOD_CROP если не нашли линии капота
+        y_hood = y_bot_band
+
     def cluster_angles(ts, k=2):
         if len(ts) < 8: return None
         ts = np.array(ts, np.float32).reshape(-1,1)
@@ -138,8 +170,9 @@ def detect_road_roi(image, prev_poly=None, beta=0.3):
         if len(pts) >= 3:
             vp = tuple(np.median(np.array(pts, np.float32), axis=0))
 
-    # Build trapezoid, clamped to the band (no sky, no hood)
-    y_bottom = y_bot_band
+    # Build trapezoid with automatically detected hood horizon
+    # АВТОМАТИЗАЦИЯ: используем определённый горизонт капота вместо хардкода
+    y_bottom = y_hood
     if vp is not None:
         xv, yv = vp
         y_top = int(np.clip(yv, y_top_band, int(0.60*h)))
