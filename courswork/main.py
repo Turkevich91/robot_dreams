@@ -200,19 +200,11 @@ def detect_road_roi(image, prev_poly=None, beta=0.3):
     if prev_poly is not None:
         poly = (beta*poly + (1-beta)*prev_poly).astype(np.int32)
 
-    mask = np.zeros((h,w), np.uint8)
-    cv2.fillPoly(mask, [poly], 255)
-    return mask, poly
+    return poly
 
 # ==========================
 # Lane detection and fitting
 # ==========================
-
-def roi_mask(img, poly):
-    m = np.zeros_like(img)
-    cv2.fillPoly(m, [poly], 255)
-    return cv2.bitwise_and(img, m)
-
 
 def detect_lines(frame, poly, ymin=None, ymax=None):
     """Detect lane lines within ROI bounds.
@@ -224,7 +216,7 @@ def detect_lines(frame, poly, ymin=None, ymax=None):
         ymax: Maximum Y coordinate (bottom of ROI). If None, calculate from poly
 
     Returns:
-        lines, masked_edges (edges masked to ROI bounds)
+        lines: Detected line segments
     """
     h, w = frame.shape[:2]
 
@@ -234,25 +226,26 @@ def detect_lines(frame, poly, ymin=None, ymax=None):
     if ymax is None:
         ymax = int(np.max(poly[:, 1]))
 
-    # Создаём маску для ограничения по Y координатам (исключаем капот и верхнюю часть)
-    y_bound_mask = np.zeros((h, w), np.uint8)
-    y_bound_mask[ymin:ymax, :] = 255
-
     # Вычисляем edges один раз
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blur, CANNY_LOW, CANNY_HIGH)
 
     # ЛОГИКА: применяем две маски одновременно:
-    # 1. roi_mask(edges, poly) — маска полигона ROI (трапеция)
-    # 2. y_bound_mask — маска по Y координатам (исключает капот и небо)
-    roi_masked = roi_mask(edges, poly)
-    edges_bounded = cv2.bitwise_and(roi_masked, y_bound_mask)
+    # 1. Маска полигона ROI (трапеция) — cv2.fillPoly
+    # 2. Маска по Y координатам (исключает капот и небо) — y_bound_mask
+    roi_mask_poly = np.zeros_like(edges)
+    cv2.fillPoly(roi_mask_poly, [poly], 255)
+
+    y_bound_mask = np.zeros((h, w), np.uint8)
+    y_bound_mask[ymin:ymax, :] = 255
+
+    edges_bounded = cv2.bitwise_and(edges, cv2.bitwise_and(roi_mask_poly, y_bound_mask))
 
     # Поиск линий в ограниченной области
     lines = cv2.HoughLinesP(edges_bounded, 1, np.pi/180, HOUGH_THRESH,
                             minLineLength=HOUGH_MINLEN, maxLineGap=HOUGH_MAXGAP)
-    return lines, edges_bounded
+    return lines
 
 
 def fit_lane(lines):
@@ -429,7 +422,7 @@ if __name__ == "__main__":
         frame = letterbox(frame, TARGET_SIZE) if RESIZE_MODE=="fit" else stretch(frame, TARGET_SIZE)
 
         # ROI
-        _, roi_poly = detect_road_roi(frame, prev_roi, beta=0.3)
+        roi_poly = detect_road_roi(frame, prev_roi, beta=0.3)
         prev_roi = roi_poly.copy()
 
         # ИСПРАВЛЕНИЕ: вычисляем верхнюю и нижнюю границы ROI для ограничения поиска линий
@@ -437,7 +430,7 @@ if __name__ == "__main__":
         roi_ymax = int(np.max(roi_poly[:, 1]))  # нижняя граница ROI
 
         # lines and fits
-        lines, _ = detect_lines(frame, roi_poly, ymin=roi_ymin, ymax=roi_ymax)
+        lines = detect_lines(frame, roi_poly, ymin=roi_ymin, ymax=roi_ymax)
         L_hat, R_hat = fit_lane(lines)
         polyL = ema_poly(L_hat, polyL)
         polyR = ema_poly(R_hat, polyR)
