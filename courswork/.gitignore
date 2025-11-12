@@ -1,0 +1,79 @@
+# Git ignore file for Lane Detection project
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Debug files (old attempts)
+debug_stepwise.py
+debug_visualizer.py
+test_canny.py
+compare_parameters.py
+*_test.py
+*_old.py
+*_backup.py
+*_draft.py
+
+# Old documentation
+DASHED_LINES_SOLUTION.md
+*_OLD.md
+*_DRAFT.md
+
+# Output files
+debug_output/*.jpg
+debug_output/*.png
+debug_screenshots/*.jpg
+debug_screenshots/*.png
+output_videos/*.mp4
+*.mp4
+!VIDEO/*.mp4
+
+# Temporary files
+*.tmp
+*.temp
+*.cache
+.pytest_cache/
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Keep these important files
+!main.py
+!debug_integrated.py
+!resize_video.py
+!README.MD
+!CONFIG_REFERENCE.md
+!QUICK_REFERENCE.md
+!START_HERE.md
+!00_START.md
+!

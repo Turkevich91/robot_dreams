@@ -394,7 +394,8 @@ class DebugMode:
 if __name__ == "__main__":
     try:
         debug = DebugMode(
-            "VIDEO/20250330_115814_L.MP4",
+            "VIDEO/20250331_184236_L.MP4",
+            # "VIDEO/20250330_115814_L.MP4",
             "resources/wheel.png"
         )
         debug.run()
